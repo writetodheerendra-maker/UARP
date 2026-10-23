@@ -81,7 +81,7 @@
     <div class="max-w-[1550px] mx-auto px-3 sm:px-6 flex flex-wrap md:flex-nowrap items-center justify-between gap-y-2 py-2 md:h-13 md:py-1">
       
       <!-- Left Navigation Menu (Horizontally scrollable on mobile) -->
-      <nav id="mainNavTabs" class="flex items-center space-x-1 sm:space-x-2 text-[11px] sm:text-sm font-medium overflow-x-auto no-scrollbar w-full md:w-auto pb-1 md:pb-0 order-2 md:order-1 border-t border-slate-700 md:border-none pt-2 md:pt-0">
+      <nav id="mainNavTabs" class="hidden flex items-center space-x-1 sm:space-x-2 text-[11px] sm:text-sm font-medium overflow-x-auto no-scrollbar w-full md:w-auto pb-1 md:pb-0 order-2 md:order-1 border-t border-slate-700 md:border-none pt-2 md:pt-0">
         <button onclick="switchNavTab('home')" id="nav-btn-home" class="nav-tab-item px-3 py-1.5 sm:py-2 text-white bg-slate-800 font-bold transition rounded shrink-0">Dashboard</button>
         <button onclick="switchNavTab('allocation')" id="nav-btn-allocation" class="nav-tab-item px-3 py-1.5 sm:py-2 text-slate-300 hover:text-white transition rounded shrink-0">Allocation</button>
         <button onclick="switchNavTab('live')" id="nav-btn-live" class="nav-tab-item px-3 py-1.5 sm:py-2 text-slate-300 hover:text-white transition rounded shrink-0"><i class="fa-solid fa-circle text-[6px] text-rose-500 animate-pulse mr-1.5 align-middle"></i>Live Exam</button>
@@ -134,7 +134,7 @@
     <!-- ========================================================================= -->
     <!-- VIEW A: ADMIN PORTAL VIEW                                                 -->
     <!-- ========================================================================= -->
-    <div id="view-admin" class="space-y-4 sm:space-y-6">
+    <div id="view-admin" class="hidden space-y-4 sm:space-y-6">
 
       <!-- TAB 1: ADMIN HOME SCREEN (DASHBOARD) -->
       <div id="admin-panel-home" class="admin-panel-tab space-y-4 sm:space-y-6">
@@ -1093,7 +1093,7 @@
     <!-- ========================================================================= -->
     <!-- VIEW D: APPRAISER SELF-REGISTRATION / ONBOARDING                          -->
     <!-- ========================================================================= -->
-    <div id="view-registration" class="hidden space-y-6 max-w-4xl mx-auto pb-10">
+    <div id="view-registration" class="space-y-6 max-w-4xl mx-auto pb-10">
       
       <!-- Registration Header -->
       <div class="bg-gradient-to-r from-[#0b192c] to-slate-800 text-white p-6 rounded-2xl shadow-md flex flex-col md:flex-row md:items-center gap-4">
@@ -3877,6 +3877,28 @@ NBEMS Administration</textarea>
 
     // Run immediately on page load
     enforcePublicView();
+    
+    const ADMIN_PASSCODE = 'NBEMS@2026';
+    let isAdminUnlocked = false;
+
+    function unlockAdminPortal() {
+      if (isAdminUnlocked) { setRole('admin'); return; }
+      const pin = prompt('Enter NBEMS Admin Passcode:');
+      if (pin !== ADMIN_PASSCODE) {
+        if (pin !== null) showToast('Invalid Admin Passcode.', 'error');
+        return;
+      }
+      isAdminUnlocked = true;
+      byId('roleSelector').insertAdjacentHTML('afterbegin', `
+        <option value="admin">🛡️ Board Admin</option>
+        <option value="accounts">💰 Accounts Dept</option>
+      `);
+      updateAcctBadge();
+      const lockBtn = byId('adminLockBtn');
+      if (lockBtn) lockBtn.innerHTML = '<i class="fa-solid fa-lock-open text-emerald-400"></i>';
+      setRole('admin');
+      showToast('Admin & Accounts views unlocked!', 'success');
+    }
   </script>
 </body>
 </html>
