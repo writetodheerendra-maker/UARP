@@ -97,11 +97,12 @@
         <div class="flex items-center bg-slate-800 px-2 py-1 sm:px-2.5 rounded border border-slate-700 w-full md:w-auto">
           <span class="text-slate-400 mr-2 hidden lg:inline"><i class="fa-solid fa-user-gear"></i> Role:</span>
           <select id="roleSelector" onchange="switchRole(this.value)" class="bg-slate-900 text-sky-400 font-semibold py-1 px-2 rounded border border-slate-600 focus:outline-none cursor-pointer w-full md:w-auto text-[11px] sm:text-xs">
-            <option value="admin">🛡️ Board Admin</option>
-            <option value="accounts">💰 Accounts Dept</option>
+            <option value="registration" selected>📝 Appraiser Registration</option>
             <option value="appraiser">👨‍🏫 Appraiser Dashboard</option>
-            <option value="registration">📝 Appraiser Registration</option>
           </select>
+          <button id="adminLockBtn" onclick="unlockAdminPortal()" class="ml-2 text-slate-400 hover:text-amber-400 px-1.5 py-1 transition" title="Admin Login">
+            <i class="fa-solid fa-lock"></i>
+          </button>
         </div>
         <button onclick="openPalette()" class="text-slate-300 hover:text-sky-300 p-1.5 sm:p-2 text-sm sm:text-base transition" title="Quick jump (Ctrl+K)" aria-label="Quick jump">
           <i class="fa-solid fa-magnifying-glass"></i>
@@ -1897,333 +1898,28 @@ NBEMS Administration</textarea>
   <div id="toastContainer" class="fixed bottom-5 left-1/2 -translate-x-1/2 sm:translate-x-0 sm:left-auto sm:right-5 z-50 space-y-2 pointer-events-none w-[90%] sm:w-auto"></div>
 
   <!-- Client Side Portal Logic -->
-  <!-- Client Side Portal Logic + Full Supabase Integration -->
   <script>
-    // =====================================================================
-    //  0. SUPABASE CONFIGURATION & HELPERS
-    //  Replace SUPABASE_URL and SUPABASE_ANON_KEY with your project values.
-    // =====================================================================
-    const SUPABASE_URL = 'https://awpufmryoyptjsuozfuy.supabase.co';
-    const SUPABASE_ANON_KEY = 'sb_publishable_AFLvWSiXfZ_cxtH1-fOlrA_2X3SKRZg';
-    const SB_ENABLED = SUPABASE_URL.startsWith('https://') && typeof window.supabase !== 'undefined';
-    const sb = SB_ENABLED ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
-
-    // Maps exam codes ('NEET', 'FMGE') and centre codes ('CTR-101') to DB primary keys
-    const DB_MAP = { exams: {}, centres: {}, questions: { pre: {}, test: {} } };
-
-    async function sbEnsureExam(examCode) {
-      if (!sb) return null;
-      const code = examKey(examCode);
-      if (DB_MAP.exams[code]) return DB_MAP.exams[code];
-      const { data } = await sb.from('exams')
-        .upsert({ exam_code: code, exam_name: EXAM_LABEL[code] || code }, { onConflict: 'exam_code' })
-        .select('exam_id').single();
-      if (data) DB_MAP.exams[code] = data.exam_id;
-      return data ? data.exam_id : null;
-    }
-
-    async function sbEnsureCentre(code) {
-      if (!sb || !code) return null;
-      const k = String(code).trim().toUpperCase();
-      if (DB_MAP.centres[k]) return DB_MAP.centres[k];
-      const info = centreInfo(k) || { code: k, name: k, city: 'Unknown' };
-      const geo = CHECKIN_CFG.centres[k] || {};
-      const { data } = await sb.from('centres')
-        .upsert({
-          centre_code: k,
-          centre_name: info.name || k,
-          zone: info.zone || null,
-          state: info.state || null,
-          city: info.city || 'Unknown',
-          address: info.address || null,
-          pincode: info.pincode || null,
-          latitude: geo.lat || null,
-          longitude: geo.lng || null,
-          geofence_radius_m: geo.radius || 200
-        }, { onConflict: 'centre_code' })
-        .select('centre_id').single();
-      if (data) DB_MAP.centres[k] = data.centre_id;
-      return data ? data.centre_id : null;
-    }
-
-    async function sbUploadFile(bucket, folder, fileOrDataUrl, fileName) {
-      if (!sb || !fileOrDataUrl) return null;
-      let blob = fileOrDataUrl;
-      if (typeof fileOrDataUrl === 'string' && fileOrDataUrl.startsWith('data:')) {
-        const res = await fetch(fileOrDataUrl);
-        blob = await res.blob();
-      }
-      const safeName = (fileName || (blob.name || 'file.jpg')).replace(/[^a-zA-Z0-9._-]/g, '_');
-      const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${safeName}`;
-      const { error } = await sb.storage.from(bucket).upload(path, blob, { upsert: true });
-      if (error) { console.warn('Storage upload warning:', error.message); return null; }
-      return sb.storage.from(bucket).getPublicUrl(path).data.publicUrl;
-    }
-
-    async function sbSyncAppraiserAndBill(a) {
-      if (!sb || !a) return;
-      try {
-        const exam_id = await sbEnsureExam(a.exam);
-        const centre_id = a.code ? await sbEnsureCentre(a.code) : null;
-
-        // 1. Upsert Appraiser
-        let appraiser_id = a.appraiser_id;
-        if (!appraiser_id) {
-          const { data: apRow } = await sb.from('appraisers').upsert({
-            uid: a.uid,
-            full_name: a.name,
-            email: a.email || `${a.uid.toLowerCase()}@nbems.local`,
-            mobile_number: a.mobile || '9999999999',
-            whatsapp_number: a.whatsapp || '9999999999',
-            designation: a.designation || 'Faculty Appraiser',
-            institution_name: a.institution || 'Assigned Institution',
-            city: a.city || 'New Delhi',
-            state: a.state || 'Delhi',
-            pan_number: (a.bank?.pan && a.bank.pan !== 'PENDING') ? a.bank.pan : ('PAN' + a.uid.replace(/\D/g, '').padStart(6, '0') + 'X').slice(0, 10),
-            bank_name: a.bank?.bank || 'Pending',
-            account_number: a.bank?.acc || 'Pending',
-            ifsc_code: (a.bank?.ifsc && a.bank.ifsc.length === 11) ? a.bank.ifsc : 'SBIN0000000',
-            pan_doc_url: a.pan_doc_url || 'pending',
-            cancelled_cheque_url: a.cheque_doc_url || 'pending',
-            verification_status: a.ver || 'Verified'
-          }, { onConflict: 'uid' }).select('appraiser_id').single();
-          if (apRow) { appraiser_id = apRow.appraiser_id; a.appraiser_id = appraiser_id; }
-        } else {
-          await sb.from('appraisers').update({
-            city: a.city || 'New Delhi',
-            verification_status: a.ver || 'Verified'
-          }).eq('appraiser_id', appraiser_id);
-        }
-
-        if (!appraiser_id || !exam_id) return;
-
-        // 2. Upsert Duty Allocation
-        const chk = a.code ? allocCheck(a, a.code) : { km: null, ok: true };
-        const { data: alRow } = await sb.from('duty_allocations').upsert({
-          exam_id,
-          appraiser_id,
-          centre_id,
-          estimated_one_way_km: chk.km !== null ? +chk.km.toFixed(2) : null,
-          within_90km_rule: chk.ok,
-          magic_link_token: 'magic-' + a.uid.toLowerCase(),
-          link_sent: !!a.linkSent,
-          consent_status: a.link || 'Pending',
-          appointment_sent: !!a.apptSent,
-          report_status: a.report || 'Not Started'
-        }, { onConflict: 'exam_id,appraiser_id' }).select('allocation_id').single();
-
-        const allocation_id = alRow ? alRow.allocation_id : a.allocation_id;
-        if (allocation_id) {
-          a.allocation_id = allocation_id;
-          // 3. Upsert Duty Bill
-          await sb.from('duty_bills').upsert({
-            allocation_id,
-            pre_visit_status: a.pre || 'not_verified',
-            test_visit_status: a.test || 'not_verified',
-            forwarded_to_accounts: !!a.fwd,
-            pre_honorarium_inr: a.preAmt || 3500,
-            test_honorarium_inr: a.testAmt || 7500,
-            ta_claimed_inr: a.ta || 0,
-            ta_verification_status: a.taStatus || 'pending',
-            bill_status: a.bill || 'pending',
-            utr_reference_no: a.utr || null,
-            return_reason: a.reason || null
-          }, { onConflict: 'allocation_id' });
-        }
-      } catch (err) {
-        console.warn('Supabase sync warning:', err.message);
-      }
-    }
-
-    async function sbLogLiveEvent(type, a, text, stage) {
-      if (!sb) return;
-      try {
-        const exam_id = a ? await sbEnsureExam(a.exam) : null;
-        await sb.from('live_activity_logs').insert([{
-          exam_id,
-          appraiser_id: a?.appraiser_id || null,
-          event_type: type,
-          stage: stage || '',
-          description: text
-        }]);
-      } catch (e) { /* ignore log errors */ }
-    }
-
-    async function loadPortalFromSupabase() {
-      if (!sb) return;
-      try {
-        // 1. Load Custom Cities
-        const { data: cities } = await sb.from('cities').select('*');
-        if (cities && cities.length) {
-          cities.forEach(c => {
-            addCityXY(c.city_name, c.latitude, c.longitude);
-            if (!CITY_NAMES.includes(c.city_name)) CITY_NAMES.push(c.city_name);
-          });
-          KM_CACHE.clear();
-          refreshCityList();
-        }
-
-        // 2. Load Exams
-        const { data: exams } = await sb.from('exams').select('*');
-        if (exams) exams.forEach(e => { DB_MAP.exams[e.exam_code] = e.exam_id; });
-
-        // 3. Load Centres
-        const { data: centres } = await sb.from('centres').select('*').order('centre_code');
-        if (centres && centres.length) {
-          CENTRE_MASTER = centres.map(c => {
-            DB_MAP.centres[c.centre_code] = c.centre_id;
-            if (c.latitude && c.longitude) {
-              CHECKIN_CFG.centres[c.centre_code] = {
-                name: c.centre_name,
-                lat: Number(c.latitude),
-                lng: Number(c.longitude),
-                radius: Number(c.geofence_radius_m || 200)
-              };
-            }
-            return {
-              zone: c.zone || '',
-              state: c.state || '',
-              city: c.city || '',
-              code: c.centre_code,
-              name: c.centre_name,
-              address: c.address || '',
-              pincode: c.pincode || ''
-            };
-          });
-          cmSave();
-        }
-
-        // 4. Load Allocations + Appraisers + Bills + Checkins
-        const { data: allocs } = await sb.from('duty_allocations').select(`
-          allocation_id,
-          consent_status,
-          link_sent,
-          appointment_sent,
-          signed_proforma_url,
-           signed_proforma_uploaded_at,
-          report_status,
-          exams ( exam_code ),
-          centres ( centre_code ),
-          appraisers ( * ),
-          duty_bills ( * ),
-          geo_checkins ( * )
-        `).order('allocation_id');
-
-        if (allocs && allocs.length) {
-          APP.length = 0;
-          allocs.forEach(row => {
-            const ap = row.appraisers;
-            if (!ap) return;
-            const bill = Array.isArray(row.duty_bills) ? (row.duty_bills[0] || {}) : (row.duty_bills || {});
-            const checkins = {};
-            const fails = { pre: 0, test: 0 };
-            (row.geo_checkins || []).forEach(ckRow => {
-              if (ckRow.attempt_status === 'success') {
-                checkins[ckRow.stage] = {
-                  time: new Date(ckRow.captured_at),
-                  fix: {
-                    lat: Number(ckRow.captured_lat || 0),
-                    lng: Number(ckRow.captured_lng || 0),
-                    acc: Number(ckRow.gps_accuracy_m || 15),
-                    dist: Number(ckRow.distance_from_centre_m || 0)
-                  },
-                  photo: ckRow.selfie_data_url || '',
-                  centre: row.centres?.centre_code || '',
-                  radius: ckRow.geofence_limit_m || 200
-                };
-              } else {
-                fails[ckRow.stage] = (fails[ckRow.stage] || 0) + 1;
-              }
-            });
-
-            APP.push({
-              id: row.allocation_id,
-              allocation_id: row.allocation_id,
-              appraiser_id: ap.appraiser_id,
-              uid: ap.uid,
-              name: ap.full_name,
-              city: ap.city || '',
-              exam: row.exams?.exam_code || 'NEET',
-              code: row.centres?.centre_code || '',
-              ver: ap.verification_status || 'Verified',
-              report: row.report_status || 'Not Started',
-              link: row.consent_status || 'Pending',
-              linkSent: !!row.link_sent,
-              apptSent: !!row.appointment_sent,
-              proforma: row.signed_proforma_url ? { name: 'Signed_Proforma.pdf', url: row.signed_proforma_url, time: new Date(row.signed_proforma_uploaded_at || Date.now()) } : null,
-              pre: bill.pre_visit_status || 'not_verified',
-              test: bill.test_visit_status || 'not_verified',
-              fwd: !!bill.forwarded_to_accounts,
-              preAmt: Number(bill.pre_honorarium_inr ?? 3500),
-              testAmt: Number(bill.test_honorarium_inr ?? 7500),
-              ta: Number(bill.ta_claimed_inr ?? 0),
-              taStatus: bill.ta_verification_status || 'pending',
-              bill: bill.bill_status || 'pending',
-              utr: bill.utr_reference_no || '',
-              reason: bill.return_reason || '',
-              checkins,
-              fails,
-              apptFiles: [],
-              bank: {
-                pan: ap.pan_number || '-',
-                bank: ap.bank_name || '-',
-                acc: ap.account_number || '-',
-                ifsc: ap.ifsc_code || '-'
-              }
-            });
-          });
-        }
-
-        // 5. Load Recent Live Events
-        const { data: logs } = await sb.from('live_activity_logs')
-          .select('*, appraisers(uid, full_name)')
-          .order('created_at', { ascending: false })
-          .limit(60);
-        if (logs && logs.length) {
-          LIVE.events = logs.map(l => ({
-            t: new Date(l.created_at),
-            type: l.event_type,
-            uid: l.appraisers?.uid || '',
-            name: l.appraisers?.full_name || '',
-            text: l.description,
-            stage: l.stage || ''
-          }));
-        }
-
-        cmRender();
-        onCentresChanged();
-        renderGeoCells();
-        refreshAll();
-        showToast('Connected to Supabase live database.', 'success');
-      } catch (err) {
-        console.warn('Supabase initial load fell back to local state:', err.message);
-      }
-    }
-
-    // =====================================================================
-    //  CLOCK & MODAL CONTROLS
-    // =====================================================================
     function updateClock() {
       const now = new Date();
       const el = document.getElementById('liveTimestamp');
       if (el) {
-        el.textContent = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) + ' ' + now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+        el.textContent = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) + ' ' + now.toLocaleTimeString('en-US', {hour: '2-digit', minute:'2-digit'});
       }
     }
     setInterval(updateClock, 1000);
     updateClock();
 
-    function openModal(id) {
-      document.getElementById(id).classList.remove('hidden');
-      document.body.style.overflow = 'hidden';
+    function openModal(id) { 
+      document.getElementById(id).classList.remove('hidden'); 
+      document.body.style.overflow = 'hidden'; 
     }
-
+    
     // REGISTRATION UI LOGIC
     function copyMobileToWhatsapp() {
       const mobileInput = document.getElementById('regMobile').value;
       const whatsappInput = document.getElementById('regWhatsapp');
       const checkbox = document.getElementById('copyMobileBtn');
-
+      
       if (checkbox.checked) {
         whatsappInput.value = mobileInput;
         whatsappInput.readOnly = true;
@@ -2244,138 +1940,28 @@ NBEMS Administration</textarea>
       }
     }
 
-    // =====================================================================
-    //  TEMPLATES, TRAVEL BILL, PRE/MOCK & TEST DAY SUBMISSIONS (+ SUPABASE)
-    // =====================================================================
-    async function saveTemplates() {
-      const modal = byId('modalTemplates');
-      const inputs = modal.querySelectorAll('input[type="text"]');
-      const areas = modal.querySelectorAll('textarea');
-      if (sb && inputs.length >= 2 && areas.length >= 2) {
-        await sb.from('communication_templates').upsert([
-          { template_type: 'magic_link', subject_template: inputs[0].value, body_template: areas[0].value, attach_guidelines: GL.attach },
-          { template_type: 'appointment_letter', subject_template: inputs[1].value, body_template: areas[1].value, attach_guidelines: GL.attach }
-        ], { onConflict: 'template_type' });
-      }
+    // NAVIGATION LOGIC
+    function saveTemplates() {
       closeModal('modalTemplates');
       showToast('Communication templates updated successfully!', 'success');
     }
 
-    async function submitTravelBill() {
-      const modal = byId('modalTravelClaim');
-      const dates = modal.querySelectorAll('input[type="date"]');
-      const kms = modal.querySelectorAll('input[type="number"]');
-      const modes = modal.querySelectorAll('select');
-
-      const preKm = parseFloat(kms[0]?.value || 0);
-      const testKm = parseFloat(kms[1]?.value || 0);
-      // Rate calculation: Rs 16/km round trip
-      const claimedAmt = +((preKm + testKm) * 2 * 16).toFixed(2);
-
-      const apMe = APP.find(x => x.uid === APPRAISER.uid);
-      if (apMe) {
-        if (claimedAmt > 0) apMe.ta = claimedAmt;
-        apMe.taStatus = 'pending';
-        await sbSyncAppraiserAndBill(apMe);
-        if (sb && apMe.allocation_id) {
-          await sb.from('travel_claims').upsert({
-            allocation_id: apMe.allocation_id,
-            pre_travel_date: dates[0]?.value || null,
-            pre_distance_km: preKm || null,
-            pre_travel_mode: modes[0]?.value || null,
-            test_travel_date: dates[1]?.value || null,
-            test_distance_km: testKm || null,
-            test_travel_mode: modes[1]?.value || null,
-            claimed_amount_inr: apMe.ta
-          }, { onConflict: 'allocation_id' });
-        }
-        refreshAll();
-      }
+    function submitTravelBill() {
       closeModal('modalTravelClaim');
       showToast('Travelling details submitted successfully to Finance Dept!', 'success');
     }
-
-    async function collectAndSaveAudit(stage, modalId, prefix, totalQs) {
-      const modal = byId(modalId);
-      const cards = modal.querySelectorAll('.p-3.bg-white.rounded-lg');
-      const answers = {};
-      const remarks = {};
-
-      cards.forEach((card, idx) => {
-        const qNum = idx + 1;
-        const checked = card.querySelector(`input[name="${prefix}_q${qNum}"]:checked`);
-        if (checked) answers[qNum] = checked.value;
-        const remInput = card.querySelector('input[type="text"], textarea');
-        if (remInput && remInput.value.trim()) remarks[qNum] = remInput.value.trim();
-      });
-
-      const deskCount = stage === 'pre' ? parseInt(modal.querySelector('input[name="pre_q14_count"]')?.value || 0, 10) : null;
-
-      // Update live Centre Grading state immediately
-      const cObj = CENTRES.find(c => String(c.code).toUpperCase() === String(APPRAISER.centre).toUpperCase());
-      if (cObj) {
-        const adverseMap = {};
-        const spec = stage === 'pre' ? PRE_Q : TEST_Q;
-        spec.forEach(q => {
-          const val = answers[q.id];
-          if (val) adverseMap[q.id] = val;
-        });
-        cObj[stage] = adverseMap;
-        renderCentreGrades();
-      }
-
-      const apMe = APP.find(x => x.uid === APPRAISER.uid);
-      if (apMe) {
-        apMe.report = 'Submitted';
-        await sbSyncAppraiserAndBill(apMe);
-        if (sb && apMe.allocation_id) {
-          const spec = stage === 'pre' ? PRE_Q : TEST_Q;
-          const scored = scoreAudit(spec, answers);
-          const { data: sub } = await sb.from('audit_submissions').upsert({
-            allocation_id: apMe.allocation_id,
-            stage,
-            registration_desk_count: deskCount || null,
-            points_earned: scored.earned,
-            points_possible: scored.possible,
-            score_pct: +scored.pct.toFixed(2),
-            major_fail_count: scored.majorFails.length,
-            minor_fail_count: scored.minorFails.length,
-            critical_fail_count: scored.critFails.length,
-            gate_passed: scored.gateOk
-          }, { onConflict: 'allocation_id,stage' }).select('submission_id').single();
-
-          if (sub && cObj) {
-            const g = gradeCentre(cObj);
-            const exam_id = await sbEnsureExam(apMe.exam);
-            const centre_id = await sbEnsureCentre(cObj.code);
-            if (exam_id && centre_id) {
-              await sb.from('centre_grades').upsert({
-                exam_id,
-                centre_id,
-                combined_score_pct: g.score !== null ? +g.score.toFixed(2) : null,
-                final_category: g.category,
-                override_notes: g.notes.join('; ')
-              }, { onConflict: 'exam_id,centre_id' });
-            }
-          }
-        }
-        refreshAll();
-      }
-    }
-
-    async function submitPreMockAssessment() {
-      await collectAndSaveAudit('pre', 'modalPreMock', 'pre', 20);
+    
+    function submitPreMockAssessment() {
       closeModal('modalPreMock');
       showToast('Pre/Mock Assessment Checklist submitted successfully!', 'success');
     }
 
-    async function submitTestAssessment() {
-      await collectAndSaveAudit('test', 'modalTestReport', 'post', 25);
+    function submitTestAssessment() {
       closeModal('modalTestReport');
       showToast('Test-Day Assessment Report uploaded!', 'success');
     }
-
-    // ===== TOAST (supports an optional action button) =====
+  
+    // ===== TOAST (now supports an optional action button) =====
     function showToast(message, type = 'info', action) {
       const container = document.getElementById('toastContainer');
       const toast = document.createElement('div');
@@ -2452,8 +2038,8 @@ NBEMS Administration</textarea>
       if (tab === 'live') renderLive();
     }
 
-    // ===== REGISTRATION (with validation + Supabase Storage & Insert) =====
-    async function submitRegistration() {
+    // ===== REGISTRATION (with validation) =====
+    function submitRegistration() {
       const view = byId('view-registration');
       const fields = [...view.querySelectorAll('input[type=text],input[type=email],input[type=tel],input[type=password]')];
       const BAD = ['border-rose-500', 'ring-1', 'ring-rose-400'];
@@ -2479,82 +2065,15 @@ NBEMS Administration</textarea>
         if (first) { if (first.scrollIntoView) first.scrollIntoView({ behavior: 'smooth', block: 'center' }); first.focus(); }
         return;
       }
-
       const btn = byId('regSubmitBtn');
       btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Processing...`;
       btn.disabled = true;
       btn.classList.replace('bg-[#0b192c]', 'bg-slate-500');
-
-      // Extract values by order in view-registration
-      const fullName = fields[0]?.value.trim();
-      const email = fields[1]?.value.trim();
-      const mobile = byId('regMobile').value.trim();
-      const whatsapp = byId('regWhatsapp').value.trim();
-      const designation = fields[4]?.value.trim();
-      const institution = fields[5]?.value.trim();
-      const city = fields[6]?.value.trim();
-      const state = fields[7]?.value.trim();
-      const pan = fields[8]?.value.trim().toUpperCase();
-      const bankName = fields[9]?.value.trim();
-      const accNum = acc.value.trim();
-      const ifsc = fields[12]?.value.trim().toUpperCase();
-
-      const uid = 'APP-' + Math.floor(9400 + Math.random() * 599);
-      const newAp = {
-        id: Date.now(),
-        uid,
-        name: fullName,
-        email,
-        mobile,
-        whatsapp,
-        designation,
-        institution,
-        city,
-        state,
-        exam: 'NEET',
-        code: '',
-        ver: 'Pending',
-        report: 'Not Started',
-        link: 'Pending',
-        linkSent: false,
-        apptSent: false,
-        pre: 'not_verified',
-        test: 'not_verified',
-        fwd: false,
-        preAmt: 3500,
-        testAmt: 7500,
-        ta: 0,
-        taStatus: 'pending',
-        bill: 'pending',
-        utr: '',
-        reason: '',
-        checkins: {},
-        fails: { pre: 0, test: 0 },
-        apptFiles: [],
-        bank: { pan, bank: bankName, acc: accNum, ifsc }
-      };
-
-      try {
-        if (sb) {
-          const [panUrl, chequeUrl] = await Promise.all([
-            sbUploadFile('kyc-documents', 'pan', byId('uploadPAN').files[0]),
-            sbUploadFile('kyc-documents', 'cheques', byId('uploadCheque').files[0])
-          ]);
-          newAp.pan_doc_url = panUrl || 'uploaded';
-          newAp.cheque_doc_url = chequeUrl || 'uploaded';
-        }
-        APP.push(newAp);
-        await sbSyncAppraiserAndBill(newAp);
-        refreshAll();
-        showToast(`Registration submitted (${uid})! Pending verification.`, 'success');
+      setTimeout(() => {
+        showToast('Registration submitted successfully! Pending verification.', 'success');
         btn.innerHTML = `<i class="fa-solid fa-check"></i> Registration Submitted`;
         btn.classList.replace('bg-slate-500', 'bg-emerald-600');
-      } catch (err) {
-        showToast(err.message || 'Registration error', 'error');
-        btn.disabled = false;
-        btn.innerHTML = `Submit Registration Details <i class="fa-solid fa-arrow-right"></i>`;
-        btn.classList.replace('bg-slate-500', 'bg-[#0b192c]');
-      }
+      }, 1500);
     }
 
     // ===== CENTRE GRADE LIST: render (table on desktop, cards on mobile) + export =====
@@ -2608,6 +2127,8 @@ NBEMS Administration</textarea>
 
     // =====================================================================
     //  SHARED PORTAL STATE
+    //  One data set drives the Admin lists, the Duty Verification Desk and
+    //  the Accounts desk, so an action in one place shows up in the others.
     // =====================================================================
     const byId = id => document.getElementById(id);
     const examKey = e => /^FMGE/i.test(e || '') ? 'FMGE' : 'NEET';
@@ -2617,6 +2138,7 @@ NBEMS Administration</textarea>
     const TA_LABEL = { pending: 'Pending Rev', verified: 'Verified', not_verified: 'Not Verified' };
     const BILL_LABEL = { pending: 'Pending', sanctioned: 'Sanctioned', disbursed: 'Disbursed', returned: 'Returned' };
 
+    // Demo data. Rows 101-103 are the original sample appraisers; 201-203 were added so the exam filters have something to switch between.
     const APP = [
       { id: 101, uid: 'APP-9041', city: 'New Delhi', name: 'Prof. Ananya Sen', exam: 'NEET', code: 'CTR-101', ver: 'Verified', report: 'Submitted', link: 'Accepted', linkSent: true, apptSent: false,
         pre: 'verified', test: 'verified', fwd: true, preAmt: 3500, testAmt: 7500, ta: 257.60, taStatus: 'pending', bill: 'pending', utr: '', reason: '',
@@ -2638,6 +2160,7 @@ NBEMS Administration</textarea>
         bank: { pan: 'QRSTU1357V', bank: 'Punjab National Bank', acc: '3344556677', ifsc: 'PUNB0123400' } }
     ];
 
+    // Appraisers still waiting for a centre (code is empty). The Allocation tab places them by city.
     [[301, 'APP-9301', 'Dr. Sunita Rao', 'NEET', 'Gurugram'], [302, 'APP-9302', 'Prof. Arvind Khanna', 'NEET', 'Noida'], [303, 'APP-9303', 'Dr. Farah Siddiqui', 'NEET', 'Ghaziabad'],
      [304, 'APP-9304', 'Dr. Harpreet Gill', 'NEET', 'Chandigarh'], [305, 'APP-9305', 'Prof. Manoj Tyagi', 'NEET', 'Meerut'], [306, 'APP-9306', 'Dr. Neha Bansal', 'NEET', 'Jaipur'],
      [311, 'APP-9311', 'Dr. Sandeep Kulkarni', 'FMGE', 'Thane'], [312, 'APP-9312', 'Prof. Rekha Nair', 'FMGE', 'Navi Mumbai'], [313, 'APP-9313', 'Dr. Omkar Patil', 'FMGE', 'Pune'], [314, 'APP-9314', 'Dr. Zoya Ansari', 'FMGE', 'Kalyan']
@@ -2768,10 +2291,9 @@ NBEMS Administration</textarea>
       const a = findApp(id), url = 'https://nbems-portal.example/magic/' + a.uid.toLowerCase();
       copyText(url).then(() => showToast('Magic link for ' + esc(a.name) + ' copied.', 'success')).catch(() => showToast('Could not copy. Link: ' + url, 'error'));
     }
-    async function sendAppointment(id) {
+    function sendAppointment(id) {
       const a = findApp(id); a.apptSent = true; a.apptFiles = glFiles(); refreshAll();
       logEvent('appointment', a, 'appointment letter sent' + (a.apptFiles.length ? ' with ' + a.apptFiles.length + ' guideline file' + (a.apptFiles.length > 1 ? 's' : '') : ''));
-      await sbSyncAppraiserAndBill(a);
       showToast('Appointment letter sent to ' + esc(a.name) + (a.apptFiles.length ? ' with ' + a.apptFiles.length + ' guideline file' + (a.apptFiles.length > 1 ? 's' : '') : '') + '.', 'success');
     }
     async function runMasterSend(kind, scope) {
@@ -2792,10 +2314,7 @@ NBEMS Administration</textarea>
       if (!r) return;
       targets.forEach(a => { if (kind === 'link') a.linkSent = true; else { a.apptSent = true; a.apptFiles = glFiles(); } });
       refreshAll();
-      for (const a of targets) {
-        logEvent(kind === 'link' ? 'link_sent' : 'appointment', a, kind === 'link' ? 'consent magic link sent' : 'appointment letter sent' + (a.apptFiles.length ? ' with ' + a.apptFiles.length + ' guideline file' + (a.apptFiles.length > 1 ? 's' : '') : ''));
-        await sbSyncAppraiserAndBill(a);
-      }
+      targets.forEach(a => logEvent(kind === 'link' ? 'link_sent' : 'appointment', a, kind === 'link' ? 'consent magic link sent' : 'appointment letter sent' + (a.apptFiles.length ? ' with ' + a.apptFiles.length + ' guideline file' + (a.apptFiles.length > 1 ? 's' : '') : '')));
       showToast((kind === 'link' ? 'Magic links sent to ' : 'Appointments sent to ') + targets.length + ' appraiser' + (targets.length > 1 ? 's' : '') + '.', 'success');
     }
     const sendSelectedLinks = () => runMasterSend('link', 'selected');
@@ -2857,13 +2376,7 @@ NBEMS Administration</textarea>
         fwdBtn(a, true) + '</div>'
       ).join('') : emptyCard('No appraisers match the selected filters.');
     }
-    async function setVisit(id, field, v) {
-      const a = findApp(id);
-      a[field] = v;
-      renderDuty();
-      refreshInsights();
-      await sbSyncAppraiserAndBill(a);
-    }
+    function setVisit(id, field, v) { findApp(id)[field] = v; renderDuty(); refreshInsights(); }
 
     function ensureVisibleInAccounts(a) {
       const ex = byId('acExam'), st = byId('acStatus');
@@ -2886,11 +2399,10 @@ NBEMS Administration</textarea>
       a.fwd = true; a.bill = 'pending'; a.taStatus = 'pending'; a.reason = '';
       FLASH = a.id; ensureVisibleInAccounts(a);
       refreshAll();
-      await sbSyncAppraiserAndBill(a);
       showToast(esc(a.name) + ' verified and forwarded to Accounts.', 'success', { label: 'Open Accounts', onClick: () => setRole('accounts') });
     }
 
-    // Bank details modal
+    // Bank details modal (now reads the selected appraiser)
     function openBank(id) {
       const a = findApp(id), b = a.bank;
       byId('bkName').textContent = a.name; byId('bkPan').textContent = b.pan; byId('bkBank').textContent = b.bank;
@@ -2975,13 +2487,7 @@ NBEMS Administration</textarea>
       const opt = byId('roleSelector').querySelector('option[value="accounts"]');
       if (opt) opt.textContent = '\u{1F4B0} Accounts Dept' + (n ? ' (' + n + ' pending)' : '');
     }
-    async function setTaStatus(id, v) {
-      const a = findApp(id);
-      a.taStatus = v;
-      renderAccounts();
-      refreshInsights();
-      await sbSyncAppraiserAndBill(a);
-    }
+    function setTaStatus(id, v) { findApp(id).taStatus = v; renderAccounts(); refreshInsights(); }
     async function sanctionBill(id) {
       const a = findApp(id);
       if (a.taStatus === 'pending') return showToast('Review the TA claim first - choose Verified or Not Verified.', 'error');
@@ -2994,7 +2500,6 @@ NBEMS Administration</textarea>
       });
       if (!r) return;
       a.bill = 'sanctioned'; refreshAll();
-      await sbSyncAppraiserAndBill(a);
       showToast('Bill sanctioned: &#8377;' + fmtINR(billTotal(a)) + ' for ' + esc(a.name) + '.', 'success');
     }
     async function returnBill(id) {
@@ -3006,7 +2511,6 @@ NBEMS Administration</textarea>
       });
       if (!r) return;
       a.bill = 'returned'; a.fwd = false; a.reason = r.value; refreshAll();
-      await sbSyncAppraiserAndBill(a);
       showToast('Bill returned to Admin: ' + esc(a.name) + '.', 'info');
     }
     async function disburseBill(id) {
@@ -3018,7 +2522,6 @@ NBEMS Administration</textarea>
       });
       if (!r) return;
       a.bill = 'disbursed'; a.utr = r.value; refreshAll();
-      await sbSyncAppraiserAndBill(a);
       showToast('Payment recorded for ' + esc(a.name) + '.', 'success');
     }
     function downloadSlip(id) {
@@ -3108,7 +2611,7 @@ NBEMS Administration</textarea>
           if (pre && pre !== a.pre) ch.push('Pre/Mock \u2192 ' + (pre === 'verified' ? 'Verified' : 'Not Verified'));
           if (test && test !== a.test) ch.push('Test Day \u2192 ' + (test === 'verified' ? 'Verified' : 'Not Verified'));
           if (!ch.length) return { uid, name: a.name, status: 'same', msg: 'No change' };
-          return { uid, name: a.name, status: 'ok', msg: ch.join(', '), apply() { if (pre) a.pre = pre; if (test) a.test = test; sbSyncAppraiserAndBill(a); } };
+          return { uid, name: a.name, status: 'ok', msg: ch.join(', '), apply() { if (pre) a.pre = pre; if (test) a.test = test; } };
         }
       },
       accounts: {
@@ -3140,12 +2643,96 @@ NBEMS Administration</textarea>
           return { uid, name: a.name, status: 'ok', msg: ch.join(', '), apply() {
             a.taStatus = nTa; a.bill = nBill; if (utr) a.utr = utr;
             if (nBill === 'returned') { a.fwd = false; a.reason = 'Returned via proforma upload'; }
-            sbSyncAppraiserAndBill(a);
           } };
         }
       }
     };
     const PF_STATE = { duty: null, accounts: null }, PF_HIST = { duty: [], accounts: [] };
+
+    function mountProforma(kind, mountId) {
+      const cfg = PF[kind], root = byId(mountId); if (!root) return;
+      const q = s => byId('pf-' + kind + '-' + s);
+      root.innerHTML =
+        '<div class="bg-white p-3 sm:p-4 rounded-xl border border-slate-200 shadow-sm space-y-4">' +
+        '<div class="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-slate-100 pb-3">' +
+        '<h2 class="text-base sm:text-lg font-bold text-slate-800 flex items-center gap-2"><i class="fa-solid fa-file-excel text-emerald-600"></i> ' + cfg.title + '</h2>' +
+        '<p class="text-[10px] sm:text-xs text-slate-500 md:max-w-md md:text-right">' + cfg.desc + '</p></div>' +
+        '<div class="grid grid-cols-1 lg:grid-cols-2 gap-3 sm:gap-4">' +
+        '<div class="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-4 space-y-3">' +
+        '<h3 class="text-xs sm:text-sm font-bold text-slate-800 flex items-center gap-2"><span class="w-6 h-6 rounded-full bg-sky-600 text-white text-[11px] flex items-center justify-center">1</span> Download proforma</h3>' +
+        '<div class="grid grid-cols-2 gap-2 text-[11px]">' +
+        '<label class="space-y-1"><span class="font-semibold text-slate-600">Exam</span><select id="pf-' + kind + '-scope" class="w-full border border-slate-300 rounded px-2 py-1.5 bg-white"><option value="ALL">All exams</option><option value="NEET">NEET-PG 2026</option><option value="FMGE">FMGE Screening 2026</option></select></label>' +
+        '<label class="space-y-1"><span class="font-semibold text-slate-600">Format</span><select id="pf-' + kind + '-fmt" class="w-full border border-slate-300 rounded px-2 py-1.5 bg-white"><option value="xlsx">Excel (.xlsx)</option><option value="csv">CSV (.csv)</option></select></label></div>' +
+        '<p id="pf-' + kind + '-info" class="text-[11px] text-slate-500"></p>' +
+        '<button id="pf-' + kind + '-dl" class="w-full bg-sky-600 hover:bg-sky-700 text-white py-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 shadow-sm transition"><i class="fa-solid fa-download"></i> Download Proforma</button>' +
+        '<ul class="text-[10px] sm:text-[11px] text-slate-500 list-disc pl-4 space-y-0.5">' + cfg.notes.map(n => '<li>' + n + '</li>').join('') + '</ul></div>' +
+        '<div class="rounded-xl border border-slate-200 bg-slate-50 p-3 sm:p-4 space-y-3">' +
+        '<h3 class="text-xs sm:text-sm font-bold text-slate-800 flex items-center gap-2"><span class="w-6 h-6 rounded-full bg-emerald-600 text-white text-[11px] flex items-center justify-center">2</span> Upload filled proforma</h3>' +
+        '<label id="pf-' + kind + '-drop" class="pf-drop block cursor-pointer border-2 border-dashed border-slate-300 rounded-xl bg-white p-4 text-center hover:border-sky-400 transition">' +
+        '<input id="pf-' + kind + '-file" type="file" accept=".xlsx,.xls,.csv" class="hidden"><i class="fa-solid fa-cloud-arrow-up text-2xl text-sky-500"></i>' +
+        '<p class="text-xs font-bold text-slate-700 mt-1">Click to browse or drag &amp; drop</p><p id="pf-' + kind + '-fname" class="text-[10px] text-slate-500 mt-0.5">.xlsx, .xls or .csv</p></label>' +
+        '<div id="pf-' + kind + '-prev" class="hidden space-y-2"></div>' +
+        '<div class="flex flex-col sm:flex-row gap-2"><button id="pf-' + kind + '-apply" disabled class="flex-1 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 shadow-sm transition"><i class="fa-solid fa-check"></i> Apply changes</button>' +
+        '<button id="pf-' + kind + '-clear" class="sm:w-28 border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 py-2.5 rounded-lg text-xs font-semibold transition">Clear</button></div></div></div>' +
+        '<div><h3 class="text-xs font-bold text-slate-700 mb-1.5"><i class="fa-solid fa-clock-rotate-left text-slate-400 mr-1"></i>Recent uploads</h3><ul id="pf-' + kind + '-hist" class="text-[11px] text-slate-600 space-y-1"></ul></div></div>';
+
+      const rowsFor = () => { const s = q('scope').value; return APP.filter(a => cfg.pick(a) && (s === 'ALL' || a.exam === s)); };
+      const updInfo = () => { const n = rowsFor().length; q('info').innerHTML = n ? '<b>' + n + '</b> row' + (n > 1 ? 's' : '') + ' will be exported.' : '<span class="text-amber-600">No rows to export for this selection' + (kind === 'accounts' ? ' - forward a bill from the Admin desk first.' : '.') + '</span>'; };
+      const histRender = () => { q('hist').innerHTML = PF_HIST[kind].length ? PF_HIST[kind].map(h => '<li class="flex flex-wrap items-center gap-x-2 bg-slate-50 border border-slate-100 rounded px-2 py-1"><i class="fa-solid fa-file-excel text-emerald-600"></i><span class="font-semibold">' + esc(h.file) + '</span><span class="text-slate-400">' + h.time + '</span><span class="text-emerald-700 font-semibold">' + h.updated + ' updated</span><span class="text-slate-400">' + h.other + ' not applied</span></li>').join('') : '<li class="text-slate-400">No uploads yet.</li>'; };
+      const clear = () => { PF_STATE[kind] = null; q('prev').classList.add('hidden'); q('prev').innerHTML = ''; q('apply').disabled = true; q('fname').textContent = '.xlsx, .xls or .csv'; q('file').value = ''; };
+      const renderPrev = () => {
+        const st = PF_STATE[kind]; if (!st) return;
+        const c = { ok: 0, same: 0, skip: 0, error: 0 }; st.items.forEach(i => c[i.status]++);
+        const CLS = { ok: 'bg-emerald-100 text-emerald-700', same: 'bg-slate-100 text-slate-600', skip: 'bg-amber-100 text-amber-700', error: 'bg-rose-100 text-rose-700' }, LBL = { ok: 'Will update', same: 'No change', skip: 'Skipped', error: 'Error' };
+        q('prev').classList.remove('hidden');
+        q('prev').innerHTML = '<div class="flex flex-wrap gap-1.5 text-[10px] font-semibold"><span class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">' + c.ok + ' to update</span><span class="px-2 py-0.5 rounded bg-slate-100 text-slate-600">' + c.same + ' unchanged</span><span class="px-2 py-0.5 rounded bg-amber-100 text-amber-700">' + c.skip + ' skipped</span><span class="px-2 py-0.5 rounded bg-rose-100 text-rose-700">' + c.error + ' errors</span></div>' +
+          '<div class="max-h-60 overflow-auto rounded-lg border border-slate-200 bg-white"><table class="w-full text-left text-[11px] min-w-[420px]"><thead class="bg-slate-100 text-slate-600 sticky top-0"><tr><th class="py-1.5 px-2">ID</th><th class="py-1.5 px-2">Appraiser</th><th class="py-1.5 px-2">Change</th><th class="py-1.5 px-2">Result</th></tr></thead><tbody class="divide-y divide-slate-100">' +
+          st.items.map(i => '<tr><td class="py-1.5 px-2 font-mono">' + esc(i.uid) + '</td><td class="py-1.5 px-2 font-semibold text-slate-700">' + esc(i.name) + '</td><td class="py-1.5 px-2 text-slate-600">' + esc(i.msg) + '</td><td class="py-1.5 px-2"><span class="px-1.5 py-0.5 rounded font-bold ' + CLS[i.status] + '">' + LBL[i.status] + '</span></td></tr>').join('') + '</tbody></table></div>';
+        q('apply').disabled = c.ok === 0;
+        q('apply').innerHTML = '<i class="fa-solid fa-check"></i> Apply ' + (c.ok ? c.ok + ' change' + (c.ok > 1 ? 's' : '') : 'changes');
+      };
+      const handle = file => {
+        if (!file) return;
+        if (typeof XLSX === 'undefined') return showToast('Spreadsheet reader could not load - check your internet connection.', 'error');
+        if (!/\.(xlsx|xls|csv)$/i.test(file.name)) return showToast('Please upload an .xlsx, .xls or .csv file.', 'error');
+        const rd = new FileReader();
+        rd.onload = e => {
+          try {
+            const wb = XLSX.read(e.target.result, { type: 'array' });
+            const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+            const items = rows.map(r => cfg.evaluate(r)).filter(Boolean);
+            if (!items.length) { clear(); return showToast('No appraiser rows found. Use the downloaded proforma without renaming the columns.', 'error'); }
+            PF_STATE[kind] = { file: file.name, items }; q('fname').innerHTML = '<span class="text-emerald-600 font-bold"><i class="fa-solid fa-check-circle mr-1"></i>' + esc(file.name) + '</span>';
+            renderPrev();
+          } catch (err) { clear(); showToast('Could not read that file.', 'error'); }
+        };
+        rd.readAsArrayBuffer(file);
+      };
+      q('scope').addEventListener('change', updInfo);
+      q('dl').addEventListener('click', () => {
+        const rows = rowsFor();
+        if (!rows.length) return showToast(kind === 'accounts' ? 'No bills have been forwarded to Accounts yet.' : 'Nothing to export for this selection.', 'error');
+        const f = exportSheet(cfg.file, cfg.cols, rows.map(cfg.row), q('fmt').value, cfg.notes);
+        showToast('Proforma downloaded: ' + esc(f), 'success');
+      });
+      q('file').addEventListener('change', e => { handle(e.target.files[0]); });
+      const drop = q('drop');
+      ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
+      ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+      drop.addEventListener('drop', e => handle(e.dataTransfer.files[0]));
+      q('clear').addEventListener('click', clear);
+      q('apply').addEventListener('click', () => {
+        const st = PF_STATE[kind]; if (!st) return;
+        const ok = st.items.filter(i => i.status === 'ok');
+        ok.forEach(i => i.apply());
+        PF_HIST[kind].unshift({ file: st.file, time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }), updated: ok.length, other: st.items.length - ok.length });
+        PF_HIST[kind] = PF_HIST[kind].slice(0, 5);
+        clear(); histRender(); refreshAll();
+        showToast(ok.length + ' record' + (ok.length > 1 ? 's' : '') + ' updated from ' + esc(st.file) + '.', 'success');
+      });
+      updInfo(); histRender();
+      root._pfRefresh = updInfo;
+    }
 
     // =====================================================================
     //  6. LIVE INSIGHTS: CHARTS (Chart.js) + CENTRE MAP (Leaflet)
@@ -3174,7 +2761,7 @@ NBEMS Administration</textarea>
       const exam = byId('gradeExamFilter').value; if (exam.startsWith('All')) return true;
       return c.exam === exam || c.exam.includes(exam.split(/[ -]/)[0]);
     }
-    const CENTRE_GEO = {
+    const CENTRE_GEO = { // sample coordinates for the demo centres
       'CTR-101': { lat: 28.6139, lng: 77.2090, r: 200 }, 'CTR-102': { lat: 28.6304, lng: 77.2177, r: 200 }, 'CTR-103': { lat: 28.5440, lng: 77.1950, r: 200 },
       'CTR-201': { lat: 19.0760, lng: 72.8777, r: 200 }, 'CTR-202': { lat: 19.1197, lng: 72.8468, r: 200 }
     };
@@ -3199,7 +2786,7 @@ NBEMS Administration</textarea>
         pts.push([g.lat, g.lng]);
       });
       if (pts.length) MAP.fitBounds(pts, { padding: [40, 40], maxZoom: 14 });
-      if (byId('mapNote')) byId('mapNote').textContent = 'Sample coordinates \u00b7 marker colour = final grade' + (missing ? ' \u00b7 ' + missing + ' centre' + (missing > 1 ? 's' : '') + ' without coordinates not shown' : '');
+      byId('mapNote').textContent = 'Sample coordinates \u00b7 marker colour = final grade' + (missing ? ' \u00b7 ' + missing + ' centre' + (missing > 1 ? 's' : '') + ' without coordinates not shown' : '');
     }
     function refreshInsights() {
       try {
@@ -3411,7 +2998,7 @@ NBEMS Administration</textarea>
       if (!file) return;
       if (typeof XLSX === 'undefined') { showToast('Spreadsheet reader could not load.', 'error'); return; }
       const rd = new FileReader();
-      rd.onload = async e => {
+      rd.onload = e => {
         try {
           const wb = XLSX.read(e.target.result, { type: 'array' });
           const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
@@ -3419,24 +3006,6 @@ NBEMS Administration</textarea>
           setExamFilter(CENTRES);
           document.getElementById('gradeImportStatus').textContent = file.name + ': ' + CENTRES.length + ' centres loaded';
           onCentresChanged();
-          if (sb) {
-            for (const c of CENTRES) {
-              const g = gradeCentre(c);
-              const exam_id = await sbEnsureExam(c.exam);
-              const centre_id = await sbEnsureCentre(c.code);
-              if (exam_id && centre_id) {
-                await sb.from('centre_grades').upsert({
-                  exam_id,
-                  centre_id,
-                  combined_score_pct: g.score !== null ? +g.score.toFixed(2) : null,
-                  final_category: g.category,
-                  appraiser_rating_cap: c.cap || null,
-                  override_notes: g.notes.join('; '),
-                  is_imported_test_only: !!c.testOnly
-                }, { onConflict: 'exam_id,centre_id' });
-              }
-            }
-          }
           showToast(CENTRES.length + ' centres graded.', 'success');
         } catch (err) { showToast('Could not read that file.', 'error'); }
       };
@@ -3449,8 +3018,9 @@ NBEMS Administration</textarea>
       document.getElementById('gradeImportStatus').textContent = 'Showing sample data';
       onCentresChanged();
     }
-
-    // ===== GEOFENCED CHECK-IN SELFIE (+ SUPABASE STORAGE & DB) =====
+    renderCentreGrades();
+  
+    // ===== GEOFENCED CHECK-IN SELFIE =====
     const CHECKIN_CFG = { maxAccuracyM: 100, maxFixAgeS: 120, centres: { 'CTR-101': { name: 'Govt Model Sr Sec School', lat: 28.6139, lng: 77.2090, radius: 200 } } };
     const APPRAISER = { uid: 'APP-9041', name: 'Prof. Ananya Sen', centre: 'CTR-101' };
     const STAGE_LABEL = { pre: 'Pre/Mock Day', test: 'Test Day' };
@@ -3500,10 +3070,10 @@ NBEMS Administration</textarea>
         const d = distM(fix.lat, fix.lng, c.lat, c.lng);
         ck.fix = { ...fix, dist: d, t: Date.now() };
         if (fix.acc > CHECKIN_CFG.maxAccuracyM) {
-          ck.inside = false; geoFail('GPS accuracy too low (±' + Math.round(fix.acc) + ' m)', fix);
+          ck.inside = false; geoFail('GPS accuracy too low (±' + Math.round(fix.acc) + ' m)');
           show(false, '<b>Location too imprecise.</b> GPS accuracy is ±' + Math.round(fix.acc) + ' m (maximum ' + CHECKIN_CFG.maxAccuracyM + ' m). Move to an open area and verify again.');
         } else if (d > c.radius) {
-          ck.inside = false; geoFail(fmtDist(d) + ' from centre, limit ' + c.radius + ' m', fix);
+          ck.inside = false; geoFail(fmtDist(d) + ' from centre, limit ' + c.radius + ' m');
           show(false, '<b>Outside the centre geofence.</b> You are ' + fmtDist(d) + ' from ' + APPRAISER.centre + ' (limit ' + c.radius + ' m).');
         } else {
           ck.inside = true;
@@ -3551,34 +3121,11 @@ NBEMS Administration</textarea>
       const img = $ck('ckPhoto'); img.src = ck.photo; img.classList.remove('hidden');
       stopCamera(); updateCheckinButtons();
     }
-    async function submitCheckin() {
+    function submitCheckin() {
       if (!(ck.inside && ck.photo)) return;
-      let storedPhotoUrl = ck.photo;
+      CHECKINS[ck.stage] = { time: ck.photoTime, fix: ck.fix, photo: ck.photo, centre: APPRAISER.centre };
       const apMe = APP.find(x => x.uid === APPRAISER.uid);
-
-      if (sb) {
-        const upUrl = await sbUploadFile('checkins-and-sops', 'selfies', ck.photo, `${APPRAISER.uid}_${ck.stage}.jpg`);
-        if (upUrl) storedPhotoUrl = upUrl;
-        if (apMe) {
-          await sbSyncAppraiserAndBill(apMe);
-          if (apMe.allocation_id) {
-            await sb.from('geo_checkins').insert([{
-              allocation_id: apMe.allocation_id,
-              stage: ck.stage,
-              attempt_status: 'success',
-              captured_lat: ck.fix.lat,
-              captured_lng: ck.fix.lng,
-              gps_accuracy_m: ck.fix.acc,
-              distance_from_centre_m: +ck.fix.dist.toFixed(2),
-              geofence_limit_m: (centreCfg(APPRAISER.centre) || {}).radius || 200,
-              selfie_data_url: storedPhotoUrl
-            }]);
-          }
-        }
-      }
-
-      CHECKINS[ck.stage] = { time: ck.photoTime, fix: ck.fix, photo: storedPhotoUrl, centre: APPRAISER.centre };
-      if (apMe) apMe.checkins[ck.stage] = { time: ck.photoTime, fix: ck.fix, photo: storedPhotoUrl, centre: APPRAISER.centre, radius: (centreCfg(APPRAISER.centre) || {}).radius };
+      if (apMe) apMe.checkins[ck.stage] = { time: ck.photoTime, fix: ck.fix, photo: ck.photo, centre: APPRAISER.centre, radius: (centreCfg(APPRAISER.centre) || {}).radius };
       $ck('checkinStatus-' + ck.stage).innerHTML = '<span class="text-emerald-700 font-semibold"><i class="fa-solid fa-circle-check"></i> Checked in ' +
         ck.photoTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) + ' · ' + fmtDist(ck.fix.dist) + ' from centre</span>';
       if (apMe) logEvent('checkin', apMe, STAGE_LABEL[ck.stage] + ' check-in \u00b7 ' + fmtDist(ck.fix.dist) + ' from centre', ck.stage); else renderGeoCells();
@@ -3595,7 +3142,7 @@ NBEMS Administration</textarea>
     }
     renderGeoCells();
 
-    // ===== CENTRE MASTER: upload / validate / browse (+ SUPABASE) =====
+    // ===== CENTRE MASTER: upload / validate / browse =====
     const CM_COLS = ['Zone', 'State', 'City', 'Centre_Code', 'Centre_Name', 'Centre_Address', 'Pincode'];
     const CM_KEYS = { zone: 'zone', state: 'state', city: 'city', centrecode: 'code', centrename: 'name', centreaddress: 'address', pincode: 'pincode', pin: 'pincode', code: 'code', name: 'name', address: 'address' };
     let CENTRE_MASTER = [], CM_PREV = null, CM_PAGE = 0;
@@ -3640,27 +3187,14 @@ NBEMS Administration</textarea>
         '<button onclick="cmCancel()" class="sm:w-28 border border-slate-300 bg-white py-2 rounded-lg text-xs font-semibold">Cancel</button></div></div>';
     }
     function cmCancel() { CM_PREV = null; cmRenderPreview(); }
-    async function cmApply() {
+    function cmApply() {
       if (!CM_PREV) return;
       let n = 0;
-      const toUpsert = [];
       CM_PREV.items.filter(i => i.status === 'new' || i.status === 'update').forEach(i => {
         const k = CENTRE_MASTER.findIndex(c => c.code === i.rec.code);
         if (k >= 0) CENTRE_MASTER[k] = i.rec; else CENTRE_MASTER.push(i.rec);
-        toUpsert.push({
-          centre_code: i.rec.code,
-          centre_name: i.rec.name,
-          zone: i.rec.zone || null,
-          state: i.rec.state || null,
-          city: i.rec.city || 'Unknown',
-          address: i.rec.address || null,
-          pincode: i.rec.pincode || null
-        });
         n++;
       });
-      if (sb && toUpsert.length) {
-        await sb.from('centres').upsert(toUpsert, { onConflict: 'centre_code' });
-      }
       CM_PREV = null; cmSave(); cmRenderPreview(); CM_PAGE = 0; cmRender(); onCentresChanged();
       showToast(n + ' centres saved to the Centre Master.', 'success');
     }
@@ -3691,13 +3225,14 @@ NBEMS Administration</textarea>
       el.value = list.includes(cur) ? cur : '';
     }
     function cmRender() {
+      const z = byId('cmZone').value;
       cmFillSelect('cmZone', 'All zones', CENTRE_MASTER.map(c => c.zone));
       cmFillSelect('cmState', 'All states', CENTRE_MASTER.filter(c => !byId('cmZone').value || c.zone === byId('cmZone').value).map(c => c.state));
       cmFillSelect('cmCity', 'All cities', CENTRE_MASTER.filter(c => (!byId('cmZone').value || c.zone === byId('cmZone').value) && (!byId('cmState').value || c.state === byId('cmState').value)).map(c => c.city));
       const rows = cmFiltered(), pages = Math.max(1, Math.ceil(rows.length / CM_SIZE));
       CM_PAGE = Math.min(CM_PAGE, pages - 1);
       const view = rows.slice(CM_PAGE * CM_SIZE, CM_PAGE * CM_SIZE + CM_SIZE);
-      byId('cmStatus').textContent = CENTRE_MASTER.length ? CENTRE_MASTER.length + ' centres in the master list.' : 'No centre list uploaded yet.';
+      byId('cmStatus').textContent = CENTRE_MASTER.length ? CENTRE_MASTER.length + ' centres in the master list (saved in this browser).' : 'No centre list uploaded yet.';
       byId('cmCount').textContent = CENTRE_MASTER.length ? 'Showing ' + rows.length + ' of ' + CENTRE_MASTER.length + ' centres' : '';
       byId('cmBody').innerHTML = view.length ? view.map(c => '<tr class="hover:bg-slate-50"><td class="py-2 px-3 font-mono font-bold text-slate-800 whitespace-nowrap">' + esc(c.code) + '</td><td class="py-2 px-3 font-semibold text-slate-800">' + esc(c.name) + '</td><td class="py-2 px-3">' + esc(c.zone) + '</td><td class="py-2 px-3">' + esc(c.state) + '</td><td class="py-2 px-3">' + esc(c.city) + '</td><td class="py-2 px-3 max-w-[260px]">' + esc(c.address) + '</td><td class="py-2 px-3 font-mono">' + esc(c.pincode) + '</td></tr>').join('')
         : emptyRow(7, CENTRE_MASTER.length ? 'No centres match the filters.' : 'Upload your centre list to see it here.');
@@ -3719,6 +3254,7 @@ NBEMS Administration</textarea>
     }
 
     // ===== CENTRE LIST LINK: one source of truth for every centre code =====
+    // Names / cities / addresses come from the Centre Master (upload), then the grading list, then the geofence config.
     function allCentres() {
       let master = [];
       try { master = CENTRE_MASTER; } catch (e) { master = []; }
@@ -3759,7 +3295,7 @@ NBEMS Administration</textarea>
       const i = centreInfo(APPRAISER.centre);
       el.textContent = APPRAISER.centre + (i && i.name ? ' (' + i.name + ')' : ' (not in Centre List)');
     }
-    async function assignCentre(id, val) {
+    function assignCentre(id, val) {
       const a = findApp(id), code = String(val || '').trim().toUpperCase();
       if (!a || code === a.code) { renderMaster(); return; }
       if (a.fwd || a.bill === 'disbursed') { renderMaster(); return showToast('Centre cannot be changed after the bill is forwarded to Accounts.', 'error'); }
@@ -3770,7 +3306,6 @@ NBEMS Administration</textarea>
       a.code = code; AL_PLAN = null;
       if (a.uid === APPRAISER.uid) APPRAISER.centre = code;
       refreshAll();
-      await sbSyncAppraiserAndBill(a);
       showToast(esc(a.name) + ' assigned to ' + code + ' - ' + esc(info.name) + '.' + (chk.unknown ? ' City not set or not recognised, so the 90 km rule could not be checked.' : ' ' + kmTxt(chk.km) + ' one way.'), chk.unknown ? 'info' : 'success');
     }
     function centreCfg(code) {
@@ -3784,6 +3319,7 @@ NBEMS Administration</textarea>
 
     // =====================================================================
     //  CITY DISTANCE + AUTO-ALLOCATION (one-way distance never above 90 km)
+    //  Distance = straight line between the two city centres x road factor.
     // =====================================================================
     const ALLOC = { maxKm: 90, roadFactor: 1.25 };
     const CITY_DATA = ('New Delhi|28.6139|77.2090;Gurugram|28.4595|77.0266;Noida|28.5355|77.3910;Greater Noida|28.4744|77.5040;Ghaziabad|28.6692|77.4538;Faridabad|28.4089|77.3178;' +
@@ -3828,19 +3364,17 @@ NBEMS Administration</textarea>
       const dl = byId('cityList'); if (!dl) return;
       dl.innerHTML = [...new Set(CITY_NAMES)].sort().map(c => '<option value="' + esc(c) + '"></option>').join('');
     }
-    async function addCity() {
+    function addCity() {
       const name = byId('alCityName').value.trim(), lat = parseFloat(byId('alCityLat').value), lng = parseFloat(byId('alCityLng').value);
       if (!name) return showToast('Enter the city name.', 'error');
       if (!(lat >= -90 && lat <= 90) || !(lng >= -180 && lng <= 180)) return showToast('Enter valid latitude and longitude, for example 26.85 and 80.95.', 'error');
       CUSTOM_CITIES = CUSTOM_CITIES.filter(c => cityKey(c.name) !== cityKey(name)); CUSTOM_CITIES.push({ name, lat, lng });
       try { localStorage.setItem('nbems_custom_cities', JSON.stringify(CUSTOM_CITIES)); } catch (e) { /* storage blocked */ }
-      if (sb) {
-        await sb.from('cities').upsert({ city_name: name, latitude: lat, longitude: lng, is_custom: true }, { onConflict: 'city_name' });
-      }
       addCityXY(name, lat, lng); CITY_NAMES.push(name); KM_CACHE.clear(); refreshCityList();
       ['alCityName', 'alCityLat', 'alCityLng'].forEach(i => byId(i).value = '');
       AL_PLAN = null; renderAlloc(); showToast(esc(name) + ' added. Distances were recalculated.', 'success');
     }
+    // Rule check for one appraiser against one centre code.
     function allocCheck(a, code) {
       const info = centreInfo(code), cc = info ? info.city : '';
       const km = cityKm(a.city, cc);
@@ -3866,6 +3400,7 @@ NBEMS Administration</textarea>
         list.sort((x, y) => x.km - y.km || x.p.id - y.p.id);
         return list;
       });
+      // Maximum matching (augmenting paths); slots with the fewest options go first, nearest appraiser first.
       const owner = new Map(), got = new Map();
       const aug = (si, seen) => {
         for (const e of edges[si]) {
@@ -3896,7 +3431,7 @@ NBEMS Administration</textarea>
       const leftovers = pool.filter(p => !used.has(p.id)).map(p => {
         let why;
         if (!p.city) why = 'City missing';
-        else if (!cityKnown(p.city)) why = 'City "' + p.city + '" is not recognised';
+        else if (!cityKnown(p.city)) why = 'City "' + p.city + '" not recognised';
         else if (!slots.length) why = 'No centre needs an appraiser';
         else {
           let best = null;
@@ -3925,26 +3460,22 @@ NBEMS Administration</textarea>
           '<p class="mt-2 text-[11px] text-slate-500">Magic links are not sent automatically. Send them from the Dashboard.</p>'
       });
       if (!r) return;
-      for (const x of rows) {
-        x.p.code = x.slot.code;
-        if (x.p.uid === APPRAISER.uid) APPRAISER.centre = x.slot.code;
+      rows.forEach(x => {
+        x.p.code = x.slot.code; if (x.p.uid === APPRAISER.uid) APPRAISER.centre = x.slot.code;
         logEvent('allocated', x.p, 'Allocated to ' + x.slot.code + (x.slot.name ? ' - ' + x.slot.name : '') + ' (' + kmTxt(x.km) + ' one way)');
-        await sbSyncAppraiserAndBill(x.p);
-      }
+      });
       AL_PLAN = null; refreshAll();
       showToast(rows.length + ' appraiser' + (rows.length > 1 ? 's' : '') + ' allocated.', 'success', { label: 'Send links', onClick: () => goAdmin('home') });
     }
-    async function setApprCity(id, val) {
+    function setApprCity(id, val) {
       const a = findApp(id); if (!a) return;
       a.city = String(val || '').trim(); AL_PLAN = null;
       if (a.city && !cityKnown(a.city)) showToast('"' + esc(a.city) + '" is not recognised, so its distance cannot be checked. Add its coordinates above.', 'info');
       refreshAll();
-      await sbSyncAppraiserAndBill(a);
     }
-    async function releaseAppr(id) {
+    function releaseAppr(id) {
       const a = findApp(id); if (!a || a.fwd || a.bill === 'disbursed') return showToast('Locked: already forwarded to Accounts.', 'error');
       const old = a.code; a.code = ''; AL_PLAN = null; refreshAll();
-      await sbSyncAppraiserAndBill(a);
       showToast(esc(a.name) + ' released from ' + old + '. Run the allocation again.', 'info');
     }
     const allocVisible = () => !byId('view-admin').classList.contains('hidden') && !byId('admin-panel-allocation').classList.contains('hidden');
@@ -4007,21 +3538,24 @@ NBEMS Administration</textarea>
     }
 
     // =====================================================================
-    //  LIVE EXAM MONITOR (+ SUPABASE REALTIME CHANNEL)
+    //  LIVE EXAM MONITOR (consent, appointment, geofenced selfie attendance)
     // =====================================================================
     const LIVE = { events: [], sim: null, flash: null, last: new Date(), ws: null, ft: null };
+    // Set wsUrl to a backend WebSocket that sends JSON such as
+    //  {"type":"consent","uid":"APP-9041","status":"accepted|rejected"}   {"type":"appointment","uid":"..."}
+    //  {"type":"checkin","uid":"...","stage":"pre|test","distance":120,"lat":..,"lng":..,"acc":12,"time":"ISO","photo":"data:image/jpeg;base64,..."}
+    //  {"type":"geofence_fail","uid":"...","stage":"pre|test","distance":640}
     const LIVE_CFG = { wsUrl: '' };
     const hhmm = d => d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
     const hhmmss = d => d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const liveVisible = () => !byId('view-admin').classList.contains('hidden') && !byId('admin-panel-live').classList.contains('hidden');
-    function logEvent(type, a, text, stage, skipDb) {
+    function logEvent(type, a, text, stage) {
       LIVE.events.unshift({ t: new Date(), type, uid: a ? a.uid : '', name: a ? a.name : '', text, stage: stage || '' });
       if (LIVE.events.length > 100) LIVE.events.length = 100;
       LIVE.last = new Date(); LIVE.flash = a ? a.uid : null;
       clearTimeout(LIVE.ft); LIVE.ft = setTimeout(() => { LIVE.flash = null; }, 3000);
       if (type === 'checkin' || type === 'geofence_fail') renderGeoCells();
       if (liveVisible()) renderLive();
-      if (!skipDb) sbLogLiveEvent(type, a, text, stage);
     }
     function liveState(a) {
       if (a.link === 'Rejected') return { k: 'rejected', t: 'Declined duty', cls: 'bg-rose-100 text-rose-800 border-rose-200' };
@@ -4094,51 +3628,24 @@ NBEMS Administration</textarea>
       $ck('ckViewDetails').innerHTML = rows.map(x => '<dt class="font-semibold text-slate-500">' + x[0] + '</dt><dd>' + esc(x[1]) + '</dd>').join('');
       openModal('modalCheckinView');
     }
-    async function geoFail(reason, fix) {
+    function geoFail(reason) {
       const a = APP.find(x => x.uid === APPRAISER.uid); if (!a || !ck.stage) return;
-      a.fails[ck.stage]++;
-      logEvent('geofence_fail', a, STAGE_LABEL[ck.stage] + ' check-in refused: ' + reason, ck.stage);
-      if (sb && a.allocation_id) {
-        await sb.from('geo_checkins').insert([{
-          allocation_id: a.allocation_id,
-          stage: ck.stage,
-          attempt_status: 'failed',
-          failure_reason: reason,
-          captured_lat: fix?.lat || null,
-          captured_lng: fix?.lng || null,
-          gps_accuracy_m: fix?.acc || null,
-          distance_from_centre_m: fix?.dist ? +fix.dist.toFixed(2) : null
-        }]);
-      }
+      a.fails[ck.stage]++; logEvent('geofence_fail', a, STAGE_LABEL[ck.stage] + ' check-in refused: ' + reason, ck.stage);
     }
-
+    // ---- feed from a backend (optional) ----
     function applyLiveEvent(m) {
       const a = APP.find(x => x.uid === m.uid); if (!a) return;
       const st = m.stage === 'test' ? 'test' : 'pre';
-      if (m.type === 'consent') { a.link = m.status === 'rejected' ? 'Rejected' : 'Accepted'; a.linkSent = true; refreshAll(); logEvent(a.link === 'Rejected' ? 'consent_rejected' : 'consent_accepted', a, a.link === 'Rejected' ? 'declined the duty' : 'accepted the duty', '', true); }
-      else if (m.type === 'appointment') { a.apptSent = true; refreshAll(); logEvent('appointment', a, 'appointment letter sent', '', true); }
-      else if (m.type === 'checkin') { a.checkins[st] = { time: new Date(m.time || Date.now()), fix: { lat: m.lat, lng: m.lng, acc: m.acc || 0, dist: +m.distance || 0 }, photo: m.photo || '', centre: a.code, radius: m.radius || 200 }; refreshAll(); logEvent('checkin', a, STAGE_LABEL[st] + ' check-in · ' + fmtDist(+m.distance || 0) + ' from centre', st, true); }
-      else if (m.type === 'geofence_fail') { a.fails[st]++; logEvent('geofence_fail', a, STAGE_LABEL[st] + ' check-in refused · ' + fmtDist(+m.distance || 0) + ' from centre', st, true); }
+      if (m.type === 'consent') { a.link = m.status === 'rejected' ? 'Rejected' : 'Accepted'; a.linkSent = true; refreshAll(); logEvent(a.link === 'Rejected' ? 'consent_rejected' : 'consent_accepted', a, a.link === 'Rejected' ? 'declined the duty' : 'accepted the duty'); }
+      else if (m.type === 'appointment') { a.apptSent = true; refreshAll(); logEvent('appointment', a, 'appointment letter sent'); }
+      else if (m.type === 'checkin') { a.checkins[st] = { time: new Date(m.time || Date.now()), fix: { lat: m.lat, lng: m.lng, acc: m.acc || 0, dist: +m.distance || 0 }, photo: m.photo || '', centre: a.code, radius: m.radius || 200 }; refreshAll(); logEvent('checkin', a, STAGE_LABEL[st] + ' check-in · ' + fmtDist(+m.distance || 0) + ' from centre', st); }
+      else if (m.type === 'geofence_fail') { a.fails[st]++; logEvent('geofence_fail', a, STAGE_LABEL[st] + ' check-in refused · ' + fmtDist(+m.distance || 0) + ' from centre', st); }
     }
-
     function connectLiveFeed() {
-      if (sb) {
-        sb.channel('nbems-realtime-feed')
-          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'live_activity_logs' }, payload => {
-            const ev = payload.new;
-            const a = APP.find(x => x.appraiser_id === ev.appraiser_id);
-            logEvent(ev.event_type, a, ev.description, ev.stage, true);
-          })
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'duty_allocations' }, () => {
-            loadPortalFromSupabase();
-          })
-          .subscribe();
-        return;
-      }
       if (!LIVE_CFG.wsUrl || LIVE.ws) return;
-      try { LIVE.ws = new WebSocket(LIVE_CFG.wsUrl); LIVE.ws.onmessage = e => { try { applyLiveEvent(JSON.parse(e.data)); } catch (x) { /* ignore */ } }; LIVE.ws.onclose = () => { LIVE.ws = null; setTimeout(connectLiveFeed, 5000); }; } catch (e) { LIVE.ws = null; }
+      try { LIVE.ws = new WebSocket(LIVE_CFG.wsUrl); LIVE.ws.onmessage = e => { try { applyLiveEvent(JSON.parse(e.data)); } catch (x) { /* ignore bad message */ } }; LIVE.ws.onclose = () => { LIVE.ws = null; setTimeout(connectLiveFeed, 5000); }; } catch (e) { LIVE.ws = null; }
     }
-
+    // ---- demo simulation (no backend): other appraisers respond / check in ----
     function fakeSelfie(a, stage, dist) {
       const cv = document.createElement('canvas'); cv.width = 480; cv.height = 360; const g = cv.getContext('2d');
       const gr = g.createLinearGradient(0, 0, 480, 360); gr.addColorStop(0, '#1e293b'); gr.addColorStop(1, '#475569'); g.fillStyle = gr; g.fillRect(0, 0, 480, 360);
@@ -4150,7 +3657,7 @@ NBEMS Administration</textarea>
     function simTick() {
       const k = byId('lvExam').value, acts = [];
       APP.filter(a => matchExam(a, k) && a.code).forEach(a => {
-        if (a.link === 'Pending' && a.linkSent) acts.push(async () => { const ok = Math.random() < 0.8; a.link = ok ? 'Accepted' : 'Rejected'; refreshAll(); logEvent(ok ? 'consent_accepted' : 'consent_rejected', a, ok ? 'accepted the duty' : 'declined the duty'); await sbSyncAppraiserAndBill(a); });
+        if (a.link === 'Pending' && a.linkSent) acts.push(() => { const ok = Math.random() < 0.8; a.link = ok ? 'Accepted' : 'Rejected'; refreshAll(); logEvent(ok ? 'consent_accepted' : 'consent_rejected', a, ok ? 'accepted the duty' : 'declined the duty'); });
         if (a.link === 'Accepted' && a.apptSent) ['pre', 'test'].forEach((st, i) => { if (!a.checkins[st] && (i === 0 || a.checkins.pre)) acts.push(() => {
           if (Math.random() < 0.18) { const d = 260 + Math.random() * 640; a.fails[st]++; logEvent('geofence_fail', a, STAGE_LABEL[st] + ' check-in refused · ' + fmtDist(d) + ' from centre', st); return; }
           const d = 15 + Math.random() * 175; a.checkins[st] = { time: new Date(), fix: { lat: 0, lng: 0, acc: 12, dist: d }, photo: fakeSelfie(a, st, d), centre: a.code, radius: 200 };
@@ -4165,7 +3672,7 @@ NBEMS Administration</textarea>
     }
 
     // =====================================================================
-    //  GUIDELINES (uploaded by Admin, synced to IndexedDB + Supabase Storage)
+    //  GUIDELINES (uploaded by Admin, sent with the appointment letter)
     // =====================================================================
     const GL = { items: [], attach: true, db: null, mem: false };
     try { GL.attach = localStorage.getItem('nbems_gl_attach') !== '0'; } catch (e) { /* storage blocked */ }
@@ -4186,19 +3693,7 @@ NBEMS Administration</textarea>
         if (!OK.test(f.name)) { bad.push(f.name + ' (use PDF, Word or image)'); continue; }
         if (f.size > 10 * 1024 * 1024) { bad.push(f.name + ' (over 10 MB)'); continue; }
         if (GL.items.length >= 15) { bad.push(f.name + ' (limit is 15 files)'); continue; }
-        let remoteUrl = null;
-        if (sb) {
-          remoteUrl = await sbUploadFile('checkins-and-sops', 'guidelines', f, f.name);
-          if (remoteUrl) {
-            await sb.from('guideline_files').insert([{
-              file_name: f.name,
-              file_size_bytes: f.size,
-              mime_type: f.type || 'application/octet-stream',
-              file_storage_url: remoteUrl
-            }]);
-          }
-        }
-        const item = { id: Date.now() + '-' + Math.random().toString(36).slice(2, 7), name: f.name, size: f.size, added: Date.now(), blob: f, url: remoteUrl };
+        const item = { id: Date.now() + '-' + Math.random().toString(36).slice(2, 7), name: f.name, size: f.size, added: Date.now(), blob: f };
         if (!(await glTx('readwrite', st => st.put(item)))) GL.mem = true;
         GL.items.push(item); added++;
       }
@@ -4213,9 +3708,7 @@ NBEMS Administration</textarea>
       await glTx('readwrite', st => st.delete(id)); GL.items = GL.items.filter(x => x.id !== id); glRender();
     }
     function glDownload(id) {
-      const it = GL.items.find(x => x.id === id); if (!it) return;
-      if (it.url && !it.blob) { window.open(it.url, '_blank'); return; }
-      if (!it.blob) return;
+      const it = GL.items.find(x => x.id === id); if (!it || !it.blob) return;
       const url = URL.createObjectURL(it.blob), el = document.createElement('a'); el.href = url; el.download = it.name; document.body.appendChild(el); el.click(); el.remove(); setTimeout(() => URL.revokeObjectURL(url), 1500);
     }
     function glRender() {
@@ -4236,7 +3729,37 @@ NBEMS Administration</textarea>
       return '<p class="mt-2 text-[11px] text-slate-600"><i class="fa-solid fa-paperclip mr-1"></i>' + GL.items.length + ' guideline file' + (GL.items.length > 1 ? 's' : '') + ' will be attached: ' + GL.items.slice(0, 4).map(i => esc(i.name)).join(', ') + (GL.items.length > 4 ? ' +' + (GL.items.length - 4) + ' more' : '') + '.</p>';
     }
 
-    // ===== APPRAISER PROFORMA (PDF download + signed upload to Supabase) =====
+    // ===== INIT: PORTAL INTERACTIVITY =====
+    ['mlExam', 'mlLink'].forEach(id => byId(id).addEventListener('change', renderMaster));
+    byId('mlSearch').addEventListener('input', renderMaster);
+    byId('mlAll').addEventListener('change', e => toggleSelAll(e.target.checked));
+    ['dvExam', 'dvStatus'].forEach(id => byId(id).addEventListener('change', renderDuty));
+    byId('dvSearch').addEventListener('input', renderDuty);
+    ['acExam', 'acStatus'].forEach(id => byId(id).addEventListener('change', renderAccounts));
+    byId('acSearch').addEventListener('input', renderAccounts);
+    ['pre', 'post', 'fs'].forEach(bindPanel);
+    document.querySelectorAll('.kpi-num').forEach(animateCount);
+    byId('insightsBox').addEventListener('toggle', refreshInsights);
+    byId('palInput').addEventListener('input', () => { palIdx = 0; renderPalette(); });
+    byId('cmFile').addEventListener('change', e => { cmHandle(e.target.files[0]); e.target.value = ''; });
+    ['cmZone', 'cmState', 'cmCity'].forEach(id => byId(id).addEventListener('change', () => { CM_PAGE = 0; cmRender(); }));
+    byId('cmSearch').addEventListener('input', () => { CM_PAGE = 0; cmRender(); });
+    byId('cmPrev').addEventListener('click', () => { CM_PAGE--; cmRender(); });
+    byId('cmNext').addEventListener('click', () => { CM_PAGE++; cmRender(); });
+    cmRender();
+    refreshCentreList(); renderDutyStation();
+    refreshCityList(); glInit(); connectLiveFeed();
+    ['alExam'].forEach(id => byId(id).addEventListener('change', () => { AL_PLAN = null; renderAlloc(); }));
+    byId('alSearch').addEventListener('input', renderAlloc);
+    ['lvExam', 'lvFilter'].forEach(id => byId(id).addEventListener('change', renderLive));
+    byId('lvSearch').addEventListener('input', renderLive);
+    byId('glFile').addEventListener('change', e => { glAdd(e.target.files); e.target.value = ''; });
+    byId('glAttach').addEventListener('change', e => { GL.attach = e.target.checked; try { localStorage.setItem('nbems_gl_attach', GL.attach ? '1' : '0'); } catch (x) { /* storage blocked */ } });
+    (function () { const d = byId('glDrop'); ['dragenter', 'dragover'].forEach(ev => d.addEventListener(ev, e => { e.preventDefault(); d.classList.add('drag'); })); ['dragleave', 'drop'].forEach(ev => d.addEventListener(ev, e => { e.preventDefault(); d.classList.remove('drag'); })); d.addEventListener('drop', e => glAdd(e.dataTransfer.files)); })();
+    window.__portalReady = true;
+    refreshAll();
+
+    // ===== APPRAISER PROFORMA (PDF download + signed upload) =====
     function proformaTag(a) {
       return a.proforma ? '<div class="text-[10px] font-semibold text-emerald-600"><i class="fa-solid fa-file-pdf mr-1"></i>Signed proforma uploaded</div>' : '';
     }
@@ -4267,58 +3790,93 @@ NBEMS Administration</textarea>
       d.save('Proforma_' + APPRAISER.uid + '.pdf');
       showToast('Proforma PDF downloaded. Fill, sign and upload it.', 'success');
     }
-    async function uploadProforma(input) {
+    function uploadProforma(input) {
       const f = input.files && input.files[0]; if (!f) return;
       if (!/\.(pdf|png|jpe?g)$/i.test(f.name)) { input.value = ''; return showToast('Please upload a PDF or image of the signed proforma.', 'error'); }
       if (f.size > 10 * 1024 * 1024) { input.value = ''; return showToast('File is larger than 10 MB.', 'error'); }
-      const a = APP.find(x => x.uid === APPRAISER.uid);
-      let fileUrl = null;
-      if (sb) {
-        fileUrl = await sbUploadFile('kyc-documents', 'proformas', f, f.name);
-        if (a && a.allocation_id && fileUrl) {
-          await sb.from('duty_allocations').update({
-            signed_proforma_url: fileUrl,
-            signed_proforma_uploaded_at: new Date().toISOString()
-          }).eq('allocation_id', a.allocation_id);
-        }
-      }
-      if (a) a.proforma = { name: f.name, url: fileUrl, time: new Date() };
-      byId('proformaStatus').innerHTML = '<span class="text-emerald-700 font-semibold"><i class="fa-solid fa-circle-check"></i> Uploaded ' + esc(f.name) + ' &middot; ' + new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) + '</span>';
+      const a = APP.find(x => x.uid === APPRAISER.uid); a.proforma = { name: f.name, time: new Date() };
+      byId('proformaStatus').innerHTML = '<span class="text-emerald-700 font-semibold"><i class="fa-solid fa-circle-check"></i> Uploaded ' + esc(f.name) + ' &middot; ' + a.proforma.time.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) + '</span>';
       renderDuty(); showToast('Signed proforma uploaded.', 'success');
       input.value = '';
     }
+    // =====================================================================
+    //  PUBLIC vs. ADMIN ACCESS CONTROL
+    // =====================================================================
+    const ADMIN_PASSCODE = 'NBEMS@2026'; // <-- Change this to your secret Admin PIN/Password
+    let isAdminUnlocked = false;
 
-    // ===== INIT: PORTAL INTERACTIVITY & SUPABASE BOOTSTRAP =====
-    ['mlExam', 'mlLink'].forEach(id => byId(id).addEventListener('change', renderMaster));
-    byId('mlSearch').addEventListener('input', renderMaster);
-    byId('mlAll').addEventListener('change', e => toggleSelAll(e.target.checked));
-    ['dvExam', 'dvStatus'].forEach(id => byId(id).addEventListener('change', renderDuty));
-    byId('dvSearch').addEventListener('input', renderDuty);
-    ['acExam', 'acStatus'].forEach(id => byId(id).addEventListener('change', renderAccounts));
-    byId('acSearch').addEventListener('input', renderAccounts);
-    ['pre', 'post', 'fs'].forEach(bindPanel);
-    document.querySelectorAll('.kpi-num').forEach(animateCount);
-    byId('insightsBox').addEventListener('toggle', refreshInsights);
-    byId('palInput').addEventListener('input', () => { palIdx = 0; renderPalette(); });
-    byId('cmFile').addEventListener('change', e => { cmHandle(e.target.files[0]); e.target.value = ''; });
-    ['cmZone', 'cmState', 'cmCity'].forEach(id => byId(id).addEventListener('change', () => { CM_PAGE = 0; cmRender(); }));
-    byId('cmSearch').addEventListener('input', () => { CM_PAGE = 0; cmRender(); });
-    byId('cmPrev').addEventListener('click', () => { CM_PAGE--; cmRender(); });
-    byId('cmNext').addEventListener('click', () => { CM_PAGE++; cmRender(); });
-    cmRender();
-    renderCentreGrades();
-    refreshCentreList(); renderDutyStation();
-    refreshCityList(); glInit(); connectLiveFeed();
-    ['alExam'].forEach(id => byId(id).addEventListener('change', () => { AL_PLAN = null; renderAlloc(); }));
-    byId('alSearch').addEventListener('input', renderAlloc);
-    ['lvExam', 'lvFilter'].forEach(id => byId(id).addEventListener('change', renderLive));
-    byId('lvSearch').addEventListener('input', renderLive);
-    byId('glFile').addEventListener('change', e => { glAdd(e.target.files); e.target.value = ''; });
-    byId('glAttach').addEventListener('change', e => { GL.attach = e.target.checked; try { localStorage.setItem('nbems_gl_attach', GL.attach ? '1' : '0'); } catch (x) { /* storage blocked */ } });
-    (function () { const d = byId('glDrop'); ['dragenter', 'dragover'].forEach(ev => d.addEventListener(ev, e => { e.preventDefault(); d.classList.add('drag'); })); ['dragleave', 'drop'].forEach(ev => d.addEventListener(ev, e => { e.preventDefault(); d.classList.remove('drag'); })); d.addEventListener('drop', e => glAdd(e.dataTransfer.files)); })();
-    window.__portalReady = true;
-    refreshAll();
-    loadPortalFromSupabase();
+    function enforcePublicView() {
+      const params = new URLSearchParams(window.location.search);
+
+      // If you open your link with ?admin=1, prompt for the admin passcode immediately
+      if (params.get('admin') === '1') {
+        unlockAdminPortal();
+        return;
+      }
+
+      // Hide Admin top navigation bar and Admin/Accounts views by default
+      byId('mainNavTabs').classList.add('hidden');
+      byId('view-admin').classList.add('hidden');
+      byId('view-accounts').classList.add('hidden');
+
+      // Remove Admin commands from Ctrl+K Quick Jump palette for public visitors
+      if (typeof PALETTE !== 'undefined') {
+        for (let i = PALETTE.length - 1; i >= 0; i--) {
+          if (PALETTE[i].l.startsWith('Admin:') || PALETTE[i].l.includes('Board Admin') || PALETTE[i].l.includes('Accounts Dept') || PALETTE[i].l.includes('Export') || PALETTE[i].l.includes('Download bank')) {
+            PALETTE.splice(i, 1);
+          }
+        }
+      }
+
+      // Allow sharing direct links to either ?view=appraiser or default to registration
+      const startView = params.get('view') === 'appraiser' ? 'appraiser' : 'registration';
+      byId('roleSelector').value = startView;
+      switchRole(startView);
+    }
+
+    function unlockAdminPortal() {
+      if (isAdminUnlocked) {
+        setRole('admin');
+        return;
+      }
+      const pin = prompt('Enter NBEMS Admin Passcode:');
+      if (pin !== ADMIN_PASSCODE) {
+        if (pin !== null) showToast('Invalid Admin Passcode.', 'error');
+        return;
+      }
+
+      isAdminUnlocked = true;
+      const sel = byId('roleSelector');
+
+      // Restore Admin and Accounts options into the Role dropdown
+      sel.insertAdjacentHTML('afterbegin', `
+        <option value="admin">🛡️ Board Admin</option>
+        <option value="accounts">💰 Accounts Dept</option>
+      `);
+      updateAcctBadge();
+
+      // Update lock icon to unlocked
+      const lockBtn = byId('adminLockBtn');
+      if (lockBtn) {
+        lockBtn.innerHTML = '<i class="fa-solid fa-lock-open text-emerald-400"></i>';
+        lockBtn.title = 'Admin Unlocked';
+      }
+
+      setRole('admin');
+      showToast('Admin & Accounts views unlocked!', 'success');
+    }
+
+    // Guard switchRole so public users cannot trigger admin/accounts via console
+    const _origSwitchRole = switchRole;
+    switchRole = function(role) {
+      if (!isAdminUnlocked && (role === 'admin' || role === 'accounts')) {
+        role = 'registration';
+      }
+      _origSwitchRole(role);
+    };
+
+    // Run immediately on page load
+    enforcePublicView();
   </script>
 </body>
 </html>
